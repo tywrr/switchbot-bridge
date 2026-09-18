@@ -1,4 +1,5 @@
 use anyhow::Result;
+use btleplug::api::{Central, Peripheral};
 use clap::{Parser, Subcommand};
 use std::time::Duration;
 use tracing::info;
@@ -25,6 +26,10 @@ enum Commands {
         /// Scan duration in seconds (default: 5s)
         #[arg(short, long, default_value_t = 5)]
         duration: u64,
+
+        /// List all discovered BLE peripherals, not just SwitchBot devices
+        #[arg(short, long)]
+        all: bool,
     },
     /// Trigger a "Press" actuation on a SwitchBot Bot
     Press {
@@ -81,16 +86,33 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Scan { duration } => {
-            info!("🔍 Scanning for SwitchBot devices for {}s...", duration);
-            let bots = scan_bots(Duration::from_secs(duration)).await?;
-            if bots.is_empty() {
-                println!("\nNo SwitchBot devices found nearby. Ensure Bluetooth is enabled.");
+        Commands::Scan { duration, all } => {
+            if all {
+                info!("🔍 Scanning for ALL BLE devices for {}s...", duration);
+                let central = switchbot_bridge::discovery::get_central().await?;
+                central.start_scan(btleplug::api::ScanFilter::default()).await?;
+                tokio::time::sleep(Duration::from_secs(duration)).await;
+                let peripherals = central.peripherals().await?;
+                println!("\nFound {} BLE peripheral(s):", peripherals.len());
+                for (i, p) in peripherals.iter().enumerate() {
+                    let props = p.properties().await.ok().flatten();
+                    let name = props.as_ref().and_then(|pr| pr.local_name.clone()).unwrap_or_else(|| "<unknown>".to_string());
+                    let rssi = props.as_ref().and_then(|pr| pr.rssi).map(|r| format!("{} dBm", r)).unwrap_or_else(|| "N/A".to_string());
+                    let services = props.as_ref().map(|pr| pr.services.clone()).unwrap_or_default();
+                    println!("  [{}] Name: {:<20} | RSSI: {:<8} | ID: {} | Services: {:?}", i + 1, name, rssi, p.id(), services);
+                }
+                let _ = central.stop_scan().await;
             } else {
-                println!("\nFound {} SwitchBot device(s):", bots.len());
-                for (i, bot) in bots.iter().enumerate() {
-                    let rssi_str = bot.rssi.map(|r| format!("{} dBm", r)).unwrap_or_else(|| "N/A".to_string());
-                    println!("  [{}] Name: {:<18} | RSSI: {:<8} | ID: {}", i + 1, bot.name, rssi_str, bot.id);
+                info!("🔍 Scanning for SwitchBot devices for {}s...", duration);
+                let bots = scan_bots(Duration::from_secs(duration)).await?;
+                if bots.is_empty() {
+                    println!("\nNo SwitchBot devices found nearby. Use '--all' to inspect all discovered BLE peripherals.");
+                } else {
+                    println!("\nFound {} SwitchBot device(s):", bots.len());
+                    for (i, bot) in bots.iter().enumerate() {
+                        let rssi_str = bot.rssi.map(|r| format!("{} dBm", r)).unwrap_or_else(|| "N/A".to_string());
+                        println!("  [{}] Name: {:<18} | RSSI: {:<8} | ID: {}", i + 1, bot.name, rssi_str, bot.id);
+                    }
                 }
             }
             println!();

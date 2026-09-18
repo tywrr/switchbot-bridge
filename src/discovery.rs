@@ -18,10 +18,26 @@ pub struct DiscoveredBot {
 pub async fn get_central() -> Result<Adapter> {
     let manager = Manager::new().await?;
     let adapters = manager.adapters().await?;
-    adapters
+    let central = adapters
         .into_iter()
         .next()
-        .ok_or_else(|| anyhow!("No Bluetooth adapter found on this system"))
+        .ok_or_else(|| anyhow!("No Bluetooth adapter found on this system"))?;
+
+    let timeout = Duration::from_secs(5);
+    let start = std::time::Instant::now();
+    loop {
+        let state = central.adapter_state().await;
+        info!("Current adapter state: {:?}", state);
+        if let Ok(btleplug::api::CentralState::PoweredOn) = state {
+            break;
+        }
+        if start.elapsed() > timeout {
+            return Err(anyhow!("Timed out waiting for Bluetooth adapter to become PoweredOn (last state: {:?})", state));
+        }
+        sleep(Duration::from_millis(500)).await;
+    }
+
+    Ok(central)
 }
 
 /// Scans for SwitchBot devices for the specified duration (default 3-5 seconds).
@@ -39,21 +55,35 @@ pub async fn scan_bots(duration: Duration) -> Result<Vec<DiscoveredBot>> {
 
     let mut found = Vec::new();
     let peripherals = central.peripherals().await?;
+    info!("Total BLE peripherals observed by adapter: {}", peripherals.len());
 
-    for p in peripherals {
+    for p in &peripherals {
         if let Ok(Some(props)) = p.properties().await {
             let name = props.local_name.clone().unwrap_or_default();
             let has_service = props.services.contains(&SWITCHBOT_SERVICE_UUID);
-            let is_switchbot = has_service || name.contains("WoHand") || name.contains("Bot");
+            let is_switchbot = has_service
+                || name.to_lowercase().contains("wohand")
+                || name.to_lowercase().contains("bot")
+                || name.to_lowercase().contains("switchbot");
+
+            tracing::debug!(
+                "Peripheral id={}, name='{}', services={:?}, rssi={:?}",
+                p.id(),
+                name,
+                props.services,
+                props.rssi
+            );
 
             if is_switchbot {
                 found.push(DiscoveredBot {
                     id: p.id().to_string(),
                     name: if name.is_empty() { "Unknown SwitchBot".to_string() } else { name },
                     rssi: props.rssi,
-                    peripheral: p,
+                    peripheral: p.clone(),
                 });
             }
+        } else {
+            tracing::debug!("Peripheral id={} had no properties available", p.id());
         }
     }
 
