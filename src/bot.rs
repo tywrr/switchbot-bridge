@@ -1,5 +1,5 @@
 use anyhow::{anyhow, Result};
-use btleplug::api::{Characteristic, Peripheral as _, WriteType};
+use btleplug::api::{Peripheral as _, WriteType};
 use btleplug::platform::Peripheral;
 use std::time::Duration;
 use tokio::time::sleep;

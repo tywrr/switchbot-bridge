@@ -3,7 +3,7 @@ use btleplug::api::{Central, Manager as _, Peripheral as _, ScanFilter};
 use btleplug::platform::{Adapter, Manager, Peripheral};
 use std::time::Duration;
 use tokio::time::sleep;
-use tracing::{debug, info};
+use tracing::info;
 
 use crate::bot::SWITCHBOT_SERVICE_UUID;
 
