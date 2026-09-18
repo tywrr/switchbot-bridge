@@ -64,8 +64,8 @@ pub async fn send_bot_command(peripheral: &Peripheral, cmd: BotCommand) -> Resul
         peripheral.write(cmd_char, cmd.as_bytes(), WriteType::WithResponse).await?;
     }
 
-    info!("Command sent successfully. Waiting for actuation...");
-    sleep(Duration::from_millis(600)).await;
+    info!("Command sent successfully. Waiting for actuation (2.0s)...");
+    sleep(Duration::from_millis(2000)).await;
 
     debug!("Disconnecting...");
     let _ = peripheral.disconnect().await;
