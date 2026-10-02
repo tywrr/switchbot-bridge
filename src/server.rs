@@ -10,7 +10,8 @@ use btleplug::api::Peripheral as _;
 use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
 use std::time::Duration;
-use tracing::{error, info};
+use tokio::time::sleep;
+use tracing::{error, info, warn};
 
 use crate::bot::{send_bot_command, BotCommand};
 use crate::discovery::find_target_bot;
@@ -36,47 +37,54 @@ async fn health_check() -> impl IntoResponse {
     }))
 }
 
+/// A Bot that just finished a BLE session (e.g. the "off" press 10 s earlier)
+/// can take several seconds to resume advertising, and CoreBluetooth does not
+/// always re-list it within one scan. Retry discovery and the command a few
+/// times before reporting failure; Home Assistant waits for the power-draw
+/// change, not for this response, so a slower success is still a success.
+const COMMAND_ATTEMPTS: u32 = 3;
+const SCAN_TIMEOUT: Duration = Duration::from_secs(6);
+const RETRY_PAUSE: Duration = Duration::from_millis(1500);
+
 async fn execute_command(cmd: BotCommand, params: DeviceParams) -> (StatusCode, Json<StatusResponse>) {
     let filter = params.device.as_deref();
     info!("HTTP request: execute {:?} on device filter: {:?}", cmd.name(), filter);
 
-    match find_target_bot(filter, Duration::from_secs(6)).await {
-        Ok(peripheral) => {
-            let id = peripheral.id().to_string();
-            match send_bot_command(&peripheral, cmd).await {
-                Ok(_) => (
+    let mut last: Option<(StatusCode, String, Option<String>)> = None;
+    for attempt in 1..=COMMAND_ATTEMPTS {
+        if let Some((_, msg, _)) = &last {
+            warn!("Attempt {}/{} after: {}", attempt, COMMAND_ATTEMPTS, msg);
+            sleep(RETRY_PAUSE).await;
+        }
+        let peripheral = match find_target_bot(filter, SCAN_TIMEOUT).await {
+            Ok(p) => p,
+            Err(e) => {
+                last = Some((StatusCode::NOT_FOUND, format!("Device discovery failed: {}", e), None));
+                continue;
+            }
+        };
+        let id = peripheral.id().to_string();
+        match send_bot_command(&peripheral, cmd).await {
+            Ok(_) => {
+                return (
                     StatusCode::OK,
                     Json(StatusResponse {
                         success: true,
-                        message: format!("Successfully sent {} to SwitchBot Bot", cmd.name()),
+                        message: format!("Successfully sent {} to SwitchBot Bot (attempt {})", cmd.name(), attempt),
                         device: Some(id),
                     }),
-                ),
-                Err(e) => {
-                    error!("Failed sending command to Bot: {:?}", e);
-                    (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        Json(StatusResponse {
-                            success: false,
-                            message: format!("Command failed: {}", e),
-                            device: Some(id),
-                        }),
-                    )
-                }
+                )
+            }
+            Err(e) => {
+                let _ = peripheral.disconnect().await;
+                last = Some((StatusCode::INTERNAL_SERVER_ERROR, format!("Command failed: {}", e), Some(id)));
+                continue;
             }
         }
-        Err(e) => {
-            error!("Could not find target SwitchBot: {:?}", e);
-            (
-                StatusCode::NOT_FOUND,
-                Json(StatusResponse {
-                    success: false,
-                    message: format!("Device discovery failed: {}", e),
-                    device: None,
-                }),
-            )
-        }
     }
+    let (status, message, device) = last.expect("at least one attempt");
+    error!("Giving up after {} attempts: {}", COMMAND_ATTEMPTS, message);
+    (status, Json(StatusResponse { success: false, message, device }))
 }
 
 async fn handle_press(Query(params): Query<DeviceParams>) -> impl IntoResponse {
